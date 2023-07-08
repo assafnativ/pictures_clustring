@@ -178,6 +178,7 @@ def do_files(proc, files_list, start_date, end_date, output_directory, country, 
 def cluster_images(input_directory, output_directory):
     image_data = []
     files_list = os.listdir(input_directory)
+    files_list.sort()
 
     last_country = 'Unknown'
     last_city = 'Unknown'
