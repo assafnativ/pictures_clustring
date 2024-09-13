@@ -1,3 +1,4 @@
+import time
 import os
 import shutil
 import pickle
@@ -5,10 +6,13 @@ from functools import wraps
 import click
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
-from geopy.geocoders import Nominatim
+from geopy.geocoders import Photon
+from geopy.geocoders import GoogleV3
+from geopy.exc import GeocoderServiceError
 from datetime import datetime
 from alive_progress import alive_bar
 from pymp4.parser import Box
+from slugify import slugify
 
 CACHE_DB = None
 def cache(cache_file):
@@ -78,8 +82,83 @@ def get_coordinates(geotags):
 
     return lat, lon
 
+# Example
+# {'address_components': [{'long_name': 'XPJV+5P',
+#   'short_name': 'XPJV+5P',
+#   'types': ['plus_code']},
+#  {'long_name': 'Rishon LeTsiyon',
+#   'short_name': 'ראשל"צ',
+#   'types': ['locality', 'political']},
+#  {'long_name': 'Rehovot',
+#   'short_name': 'Rehovot',
+#   'types': ['administrative_area_level_2', 'political']},
+#  {'long_name': 'Center District',
+#   'short_name': 'Center District',
+#   'types': ['administrative_area_level_1', 'political']},
+#  {'long_name': 'Israel',
+#   'short_name': 'IL',
+#   'types': ['country', 'political']}],
+# 'formatted_address': 'XPJV+5P, Rishon LeTsiyon, Israel',
+# 'geometry': {'location': {'lat': 31.98052149999999, 'lng': 34.7452179},
+#  'location_type': 'GEOMETRIC_CENTER',
+#  'viewport': {'northeast': {'lat': 31.98187048029149,
+#    'lng': 34.7465668802915},
+#   'southwest': {'lat': 31.9791725197085, 'lng': 34.7438689197085}}},
+# 'place_id': 'ChIJVfheG_qzAhURGGd62_CnTh8',
+# 'types': ['establishment', 'point_of_interest']}
+# -----
+# {'address_components': [{'long_name': '8G3QM39P+6P',
+#   'short_name': '8G3QM39P+6P',
+#   'types': ['plus_code']}],
+# 'formatted_address': '8G3QM39P+6P',
+# 'geometry': {'bounds': {'northeast': {'lat': 31.668125, 'lng': 35.086875},
+#   'southwest': {'lat': 31.668, 'lng': 35.08674999999999}},
+#  'location': {'lat': 31.6681, 'lng': 35.0868139},
+#  'location_type': 'GEOMETRIC_CENTER',
+#  'viewport': {'northeast': {'lat': 31.6694114802915, 'lng': 35.0881614802915},
+#   'southwest': {'lat': 31.6667135197085, 'lng': 35.0854635197085}}},
+# 'place_id': 'GhIJJnUCmgirP0ARSqvGtxyLQUA',
+# 'plus_code': {'global_code': '8G3QM39P+6P'},
+# 'types': ['plus_code']}
+def get_city_from_address(address):
+    if 'address_components' in address:
+        if address['types'] == ['plus_code']:
+            return 'Unknown'
+        address = address['address_components']
+        for component in address:
+            if 'locality' in component.get('types', []):
+                return component['long_name']
+        else:
+            return 'Unknown'
+    address = address.get('properties', address)
+    address = address.get('address', address)
+    if 'city' in address:
+        return address['city']
+    if 'town' in address:
+        return address['town']
+    if 'village' in address:
+        return address['village']
+    return 'Unknown'
+
+def get_country_from_address(address):
+    if 'address_components' in address:
+        if address['types'] == ['plus_code']:
+            return 'Unknown'
+        address = address['address_components']
+        for component in address:
+            if 'country' in component.get('types', []):
+                return component['long_name']
+        else:
+            return 'Unknown'
+    address = address.get('properties', address)
+    address = address.get('address', address)
+    if 'country' in address:
+        return address['country']
+    return 'Unknown'
+
+
 location_cache = {}
-def get_location(geotags, image_path):
+def get_location(geotags, image_path, geo_service):
     if not geotags:
         print(f"No GEOTagging for picture {image_path}")
         return "Unknown", "Unknown"
@@ -87,37 +166,53 @@ def get_location(geotags, image_path):
         print(f"GEO tags missing coordinates {image_path}")
         return "Unknown", "Unknown"
 
-    try:
-        lat, lon = get_coordinates(geotags)
+    lat, lon = get_coordinates(geotags)
+    print(f"Query of {lat}, {lon}")
 
-        # Check cache for existing result
-        cache_key = f"{lat:.6f},{lon:.6f}"
-        if cache_key in location_cache:
-            return location_cache[cache_key]
+    # Check cache for existing result
+    cache_key = f"{lat:.6f},{lon:.6f}"
+    if cache_key in location_cache:
+        return location_cache[cache_key]
 
-        # If not in cache, query the geolocation service
-        geolocator = Nominatim(user_agent="geoapiExercises")
-        location = geolocator.reverse((lat, lon), exactly_one=True, language='en')
-        address = location.raw['address']
+    # If not in cache, query the geolocation service
+    for attempt in range(10):
+        try:
+            if 'type1' == geo_service:
+                geolocator = Geocodio('07d9aed7dde306690474b3aedd5de5c9ae5e643', user_agent='Python')
+                location = geolocator.reverse(f'{lat}, {lon}', exactly_one=True) #, language='en')
+            elif 'type2' == geo_service:
+                geolocator = Photon(user_agent='Python')
+                location = geolocator.reverse((lat, lon), exactly_one=True)
+            elif 'type3' == geo_service:
+                geolocator = GoogleV3('AIzaSyDiWErdHbLL2GN02yGnN-OsNWyl2VnY6FY')
+                location = geolocator.reverse(f'{lat}, {lon}') #, language='English')
+            else:
+                raise Exception(f"Invalid geo service {geo_service}")
+            if location is None:
+                print(f"Query failed for {lat}, {lon}")
+                #return 'Unknown', 'Unknown'
+                raise Exception(f"Query failed for {(lat, lon)}")
+            break
+        except GeocoderServiceError as e:
+            print(f"Error in {attempt}")
+            print(repr(e))
+            time.sleep(1)
+    else:
+        raise Exception("Geo location query failed")
 
-        # Extract city and country names
-        city = address.get('city', '')
-        if not city:
-            city = address.get('town', '')
-        if not city:
-            city = address.get('village', '')
-        country = address.get('country', '')
+    address = location.raw
 
-        # Store the result in cache
-        location_cache[cache_key] = (country, city)
+    # Extract city and country names
+    city = get_city_from_address(address)
+    country = get_country_from_address(address)
 
-        # Print the location since it's a cache miss
-        print(f"New location queried: {country}, {city}")
+    # Store the result in cache
+    location_cache[cache_key] = (country, city)
 
-        return country, city
+    # Print the location since it's a cache miss
+    print(f"New location queried: {country}, {city} for {lat}, {lon}")
 
-    except (AttributeError, KeyError, IndexError, TypeError):
-        return "Unknown", "Unknown"
+    return country, city
 
 
 def get_file_datetime(file_path):
@@ -141,12 +236,12 @@ def get_date_taken(exif, file_path, is_video=False):
     return get_file_datetime(file_path)
 
 @cache("media_indexing.pkl")
-def get_metadata(file_path):
+def get_metadata(file_path, geo_service):
     if file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
         image = Image.open(file_path)
         exif = image._getexif()
         geotags = get_geotagging(exif)
-        country, city = get_location(geotags, file_path)
+        country, city = get_location(geotags, file_path, geo_service)
         return country, city, get_date_taken(exif, file_path)
     elif file_path.lower().endswith('.mp4'):
         return None, None, get_file_datetime(file_path)
@@ -175,7 +270,8 @@ def do_files(proc, files_list, start_date, end_date, output_directory, country, 
 @click.command()
 @click.argument('input_directory', type=click.Path(exists=True))
 @click.argument('output_directory', type=click.Path())
-def cluster_images(input_directory, output_directory):
+@click.option('--geo_service', type=click.Choice(['type1', 'type2', 'type3']), default='google', required=False)
+def cluster_images(input_directory, output_directory, geo_service):
     image_data = []
     files_list = os.listdir(input_directory)
     files_list.sort()
@@ -187,7 +283,7 @@ def cluster_images(input_directory, output_directory):
     with alive_bar(len(files_list), title="Indexing") as bar:
         for media_file in files_list:
             file_path = os.path.join(input_directory, media_file)
-            country, city, date = get_metadata(file_path)
+            country, city, date = get_metadata(file_path, geo_service)
             bar()
             if None == date:
                 print(f"Skipping file {media_file}")
